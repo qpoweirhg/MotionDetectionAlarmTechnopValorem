@@ -1,0 +1,870 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Motion Alarm — Movement-unlock v2 (stop-protect + default 20s)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  :root{ --btn-big-padding:14px 18px; --btn-big-font:18px; --btn-radius:10px; }
+  body { font-family: system-ui, -apple-system, Arial; padding:14px; background:#f7f7f8; color:#111; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
+  video, canvas { border:1px solid #ddd; vertical-align:top; background:#000; }
+  #controls { margin-top:10px; display:flex; flex-direction:column; gap:10px; max-width:1200px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  label { margin-right:8px; }
+  #status { margin-top:8px; font-weight:600; }
+  small { color:#555; display:block; }
+
+  .bigBtn { padding: var(--btn-big-padding); font-size: var(--btn-big-font); border-radius: var(--btn-radius); border: 0; color: #111; cursor: pointer; box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
+  #start { background: #2ecc71; color: #042; } 
+  #stop  { background: #e74c3c; color: #fff; } 
+  #stopAlarm { background: #f39c12; color: #2b1a00; }
+
+  /* Locked (unavailable) style for Stop Alarm (quiz) */
+  .bigBtn.locked {
+    background: #f1c40f;       /* yellow/orange base */
+    color: #2b1a00;            /* dark text for contrast */
+    filter: grayscale(40%);    /* slight gray-ish look to feel 'disabled' */
+    opacity: 0.78;             /* slightly transparent to emphasize unavailability */
+    cursor: not-allowed;       /* show unavailable cursor */
+    box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+  }
+
+  .actions { display:flex; gap:10px; align-items:center; }
+  .container { position:relative; display:flex; gap:12px; align-items:flex-start; }
+  #overlay { position:absolute; pointer-events:none; left:0; top:0; }
+  #humanLabel { margin-left:12px; font-weight:700; }
+
+  #scheduleBox { background: #fff; border-radius:8px; padding:10px; border:1px solid #e2e2e2; box-shadow: 0 6px 18px rgba(0,0,0,0.04); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #scheduleList { max-width:520px; margin-top:8px; display:flex; flex-direction:column; gap:6px; }
+  .sched-item { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px; border-radius:6px; background:#fbfbfb; border:1px solid #eee; }
+  .sched-range { font-size:13px; color:#222; }
+  .sched-remove { background:#e74c3c; color:#fff; border:0; padding:6px 8px; border-radius:6px; cursor:pointer; }
+
+  #quizModal { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.45); z-index:9999; visibility:hidden; opacity:0; transition:opacity .15s ease; }
+  #quizBox { background:#fff; padding:18px; border-radius:10px; width:320px; box-shadow:0 8px 24px rgba(0,0,0,0.2); text-align:center; }
+  #colorPatch { width:160px; height:100px; margin:12px auto; border-radius:8px; border:1px solid #ccc; }
+  .choiceBtn { display:inline-block; padding:8px 12px; margin:6px; min-width:80px; border-radius:8px; cursor:pointer; border:1px solid #ccc; background:#fff; }
+  #quizMsg { margin-top:8px; font-weight:700; color:#a00; min-height:22px; }
+
+  #note { font-size:13px; color:#444; }
+  #debug { font-size:12px; color:#333; margin-left:10px; }
+  .status-pill { padding:6px 10px; border-radius:8px; background:#eee; font-weight:700; }
+  .small-input { width:84px; }
+</style>
+</head>
+<body>
+<header>
+  <h3 style="margin:0">Motion Alarm — Movement-unlock v2</h3>
+  <div style="margin-left:auto"><small>Stop protected while alarm plays. Default idle timeout: 20s.</small></div>
+</header>
+
+<div class="container">
+  <div style="display:flex; flex-direction:column; gap:8px;">
+    <video id="video" autoplay playsinline width="640" height="360"></video>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <div id="status">Camera inactive</div>
+      <div id="humanLabel"></div>
+      <div id="debug"></div>
+    </div>
+    <div id="note">Move to lower alarm and unlock quiz. Adjust thresholds below if needed.</div>
+  </div>
+
+  <div style="position:relative;">
+    <canvas id="diff" width="320" height="180" title="visual diff"></canvas>
+    <canvas id="overlay" width="320" height="180" style="position:absolute; left:0; top:0;"></canvas>
+  </div>
+</div>
+
+<div id="controls">
+  <div class="row actions">
+    <button id="start" class="bigBtn">Start</button>
+    <button id="stop" class="bigBtn" disabled>Stop</button>
+    <button id="stopAlarm" class="bigBtn locked" disabled>Stop Alarm (quiz)</button>
+
+    <label style="margin-left:10px">Inactivity timeout (sec):
+      <input id="idleTimeout" type="number" min="5" max="600" step="1" value="20" class="small-input">
+    </label>
+
+    <label>Alarm volume:
+      <input id="alarmVol" type="range" min="0" max="100" step="1" value="90" style="vertical-align:middle;">
+      <span id="av">90</span>
+      <span style="font-size:12px;color:#333;margin-left:6px;">(Slider maps higher gain for louder alarm)</span>
+    </label>
+
+    <label style="margin-left:auto"><input id="persistentAlarm" type="checkbox" checked> Persistent alarm</label>
+    <label style="margin-left:8px"><input id="enableAlarm" type="checkbox" checked> Enable alarm</label>
+  </div>
+
+  <div class="row" style="align-items:center;">
+    <div>
+      <label>Unlock duration (s): <input id="unlockSeconds" type="number" min="1" max="60" value="7" class="small-input"></label>
+      <span style="margin-left:12px;color:#555">Resume duration: <strong>10s</strong> (fixed)</span>
+    </div>
+
+    <div style="margin-left:12px">
+      <label>Detect motion % (sensitive): <input id="motionDetectPercent" type="number" min="0" max="100" step="0.1" value="3.0" class="small-input"></label>
+      <label style="margin-left:8px">Unlock motion % (medium): <input id="motionUnlockPercent" type="number" min="0" max="100" step="0.1" value="25.0" class="small-input"></label>
+    </div>
+
+    <div style="margin-left:auto">
+      <span class="status-pill" id="quizState">Quiz: Locked</span>
+    </div>
+  </div>
+
+  <div class="row" style="justify-content:flex-start;">
+    <div id="scheduleBox">
+      <div><strong>Schedules (WIB)</strong></div>
+
+      <div>
+        <div style="font-size:12px;color:#444;margin-bottom:4px;">Start (date & time)</div>
+        <input id="schedStartDate" type="date"> <input id="schedStartTime" type="time" step="60">
+      </div>
+
+      <div>
+        <div style="font-size:12px;color:#444;margin-bottom:4px;">End (date & time)</div>
+        <input id="schedEndDate" type="date"> <input id="schedEndTime" type="time" step="60">
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <button id="schedAdd">Add schedule</button>
+        <button id="schedClearAll">Clear all</button>
+      </div>
+
+      <div style="min-width:220px;">
+        <div style="font-size:12px;color:#333;"><strong>Current WIB time:</strong> <span id="nowWib"></span></div>
+        <div style="font-size:12px;color:#333;"><strong>Active schedules:</strong> <span id="schedSummary">None</span></div>
+      </div>
+
+      <div id="scheduleList"></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <small>The camera and detection stay on. Alarm fires only when schedule contains the current WIB time.</small>
+  </div>
+</div>
+
+<canvas id="proc" width="320" height="180" style="display:none"></canvas>
+
+<!-- Quiz modal -->
+<div id="quizModal" aria-hidden="true">
+  <div id="quizBox" role="dialog" aria-modal="true" aria-labelledby="quizHeader">
+    <div id="quizHeader" style="font-weight:700; font-size:18px;">Answer the colors to stop the alarm</div>
+    <div id="questionCount" style="margin-top:6px; color:#555">Question 1 / 3</div>
+    <div id="colorPatch"></div>
+    <div id="choices" style="margin-top:8px;"></div>
+    <div id="quizMsg"></div>
+    <div style="margin-top:12px"><small>Each question shows a color — pick the correct color name.</small></div>
+  </div>
+</div>
+
+<!-- MediaPipe libs -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/face_detection.js"></script>
+
+<script>
+/* ===== DOM & config ===== */
+const VIDEO_W = 640, VIDEO_H = 360;
+const PROC_W = 320, PROC_H = 180;
+const TARGET_FPS = 12;
+const PRESENCE_CHECK_INTERVAL_MS = 2000;
+const PRESENCE_TIMEOUT_MS = 5000;
+
+const video = document.getElementById('video');
+const proc = document.getElementById('proc');
+const diff = document.getElementById('diff');
+const overlay = document.getElementById('overlay');
+const status = document.getElementById('status');
+const humanLabel = document.getElementById('humanLabel');
+const debugEl = document.getElementById('debug');
+
+const startBtn = document.getElementById('start');
+const stopBtn  = document.getElementById('stop');
+const stopAlarmBtn = document.getElementById('stopAlarm');
+const enableAlarmCheckbox = document.getElementById('enableAlarm');
+const persistentAlarmCheckbox = document.getElementById('persistentAlarm');
+
+const idleTimeoutInput = document.getElementById('idleTimeout');
+const alarmVolInput = document.getElementById('alarmVol');
+const av = document.getElementById('av');
+
+const unlockSecondsInput = document.getElementById('unlockSeconds');
+const motionDetectPercentInput = document.getElementById('motionDetectPercent');
+const motionUnlockPercentInput = document.getElementById('motionUnlockPercent');
+const quizStateEl = document.getElementById('quizState');
+
+const schedStartDate = document.getElementById('schedStartDate');
+const schedStartTime = document.getElementById('schedStartTime');
+const schedEndDate = document.getElementById('schedEndDate');
+const schedEndTime = document.getElementById('schedEndTime');
+const schedAdd = document.getElementById('schedAdd');
+const schedClearAll = document.getElementById('schedClearAll');
+const schedSummary = document.getElementById('schedSummary');
+const nowWibEl = document.getElementById('nowWib');
+const scheduleListEl = document.getElementById('scheduleList');
+
+av.textContent = alarmVolInput.value;
+
+/* Canvas contexts */
+const pctx = proc.getContext('2d');
+const dctx = diff.getContext('2d');
+const octx = overlay.getContext('2d');
+
+proc.width = PROC_W; proc.height = PROC_H;
+diff.width = PROC_W; diff.height = PROC_H;
+overlay.width = PROC_W; overlay.height = PROC_H;
+video.width = VIDEO_W; video.height = VIDEO_H;
+
+/* State */
+let stream = null;
+let raf = null;
+let prevAvg = null;
+let lastTime = 0;
+
+let lastHumanSeen = 0;
+let lastHumanMotion = 0;
+let lastPresenceCheck = 0;
+let humanConfirmBuffer = [];
+
+let alarmPlaying = false;
+let alarmIntervalId = null;
+let audioCtx = null;
+let alarmGain = null;
+
+/* Pose-motion state */
+let prevPoseLandmarks = null;
+const POSE_MOTION_THRESH = 0.012;
+const POSE_MOTION_MIN_POINTS = 1;
+const POSE_MOTION_INDICES = [15,16,13,14,27,28,25,26];
+
+/* Smoothed presence/moving hysteresis */
+let presenceScore = 0;
+const PRESENCE_SCORE_MAX = 8;
+const PRESENCE_INC = 1;
+const PRESENCE_DEC = 1;
+const PRESENCE_ON_THRESH = 4;
+const PRESENCE_OFF_THRESH = 2;
+
+let movingScore = 0;
+const MOVING_SCORE_MAX = 6;
+const MOVING_INC = 1;
+const MOVING_DEC = 1;
+const MOVING_ON_THRESH = 3;
+const MOVING_OFF_THRESH = 1;
+
+/* Movement-unlock & adaptive volume state */
+let quizUnlocked = false;
+let userMaxGain = 1.6; // default mapping changed (see mapSliderToGain)
+const MIN_VOLUME_FRACTION = 0.30; // min volume when moving (30% of user max)
+let currentAlarmGainTarget = null;
+let rampIntervalId = null;
+
+// motion percent (pixel diff %) for display and thresholding
+let lastMotionPercent = 0;
+
+/* Fixed resume duration (per your request) */
+const RESUME_DURATION_MS = 10000; // 10s fixed
+
+/* Quiz */
+const QUIZ_COLORS = ['red','green','blue'];
+let quizQuestions = [];
+let quizIndex = 0;
+let quizActive = false;
+
+/* Thresholds */
+const CONFIRM_WINDOW = 3;
+const CONFIRM_REQUIRED = 2;
+const FACE_MIN_CONF = 0.35;
+const POSE_KEYPOINT_MIN = 0.35;
+
+/* Models */
+let pose = null;
+let faceDetection = null;
+let modelsLoading = false;
+
+/* Schedules storage */
+let schedules = [];
+try { const raw = localStorage.getItem('motion_alarm_schedules_v1'); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) schedules = p.filter(it => it && it.startUTC && it.endUTC && it.endUTC > it.startUTC); } } catch(e){}
+
+/* Helpers */
+function shuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } }
+function pad(n){ return String(n).padStart(2,'0'); }
+
+/* WIB formatting/parsing */
+const wibFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Jakarta',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hour12: false
+});
+function nowWibString(){
+  const parts = wibFormatter.formatToParts(new Date());
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second} WIB`;
+}
+function parseWibToUtcMillis(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null;
+  const [y,m,d] = dateStr.split('-').map(Number);
+  const [hh,mm] = timeStr.split(':').map(Number);
+  return Date.UTC(y, m-1, d, hh - 7, mm, 0, 0);
+}
+function formatUtcMillisAsWib(ms){
+  if (!ms) return '—';
+  const parts = wibFormatter.formatToParts(new Date(ms));
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute} WIB`;
+}
+
+/* Update UI for time & schedules */
+function updateNowAndSchedUI(){
+  nowWibEl.textContent = nowWibString();
+  if (schedules.length === 0){
+    schedSummary.textContent = 'None';
+    scheduleListEl.innerHTML = '<div style="color:#777">No schedules added</div>';
+    return;
+  }
+  schedSummary.textContent = `${formatUtcMillisAsWib(schedules[0].startUTC)} → ${formatUtcMillisAsWib(schedules[0].endUTC)} (1 of ${schedules.length})`;
+  scheduleListEl.innerHTML = '';
+  schedules.forEach((s, i) => {
+    const row = document.createElement('div'); row.className = 'sched-item';
+    const text = document.createElement('div'); text.className = 'sched-range'; text.textContent = `${formatUtcMillisAsWib(s.startUTC)} → ${formatUtcMillisAsWib(s.endUTC)}`;
+    const btn = document.createElement('button'); btn.className = 'sched-remove'; btn.textContent = 'Remove';
+    btn.onclick = () => { schedules.splice(i,1); localStorage.setItem('motion_alarm_schedules_v1', JSON.stringify(schedules)); updateNowAndSchedUI(); status.textContent = 'Schedule removed'; };
+    row.appendChild(text); row.appendChild(btn); scheduleListEl.appendChild(row);
+  });
+}
+
+/* Models loader */
+async function ensureModels(){
+  if (modelsLoading || (pose && faceDetection)) return;
+  modelsLoading = true;
+  status.textContent = 'Loading MediaPipe models...';
+
+  pose = new window.Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/${file}` });
+  pose.setOptions({
+    modelComplexity: 1,
+    smoothLandmarks: true,
+    enableSegmentation: false,
+    minDetectionConfidence: 0.35,
+    minTrackingConfidence: 0.35
+  });
+
+  faceDetection = new window.FaceDetection({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/${file}` });
+  faceDetection.setOptions({ model: 'short', minDetectionConfidence: FACE_MIN_CONF });
+
+  pose.onResults((r)=>{ pose._lastResults = r; });
+  faceDetection.onResults((r)=>{ faceDetection._lastResults = r; });
+
+  modelsLoading = false;
+  status.textContent = 'MediaPipe models ready.';
+}
+
+/* Audio helpers
+   mapSliderToGain: maps slider 0..100 to gain range 0.0 .. 2.0 (allows louder alarm).
+   Note: audio gain >1 amplifies generated signal but OS/master volume still affects final loudness.
+*/
+function mapSliderToGain(sliderValue){
+  const maxGain = 2.0;
+  return Math.min(maxGain, (Number(sliderValue)/100) * maxGain);
+}
+function ensureAudio(){ if (audioCtx) return; audioCtx = new (window.AudioContext || window.webkitAudioContext)(); alarmGain = audioCtx.createGain(); userMaxGain = mapSliderToGain(alarmVolInput.value || 90); alarmGain.gain.value = userMaxGain; alarmGain.connect(audioCtx.destination); currentAlarmGainTarget = userMaxGain; }
+function playBeep(){ if (!audioCtx) return; const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type='sine'; o.frequency.setValueAtTime(1600, audioCtx.currentTime); o.frequency.exponentialRampToValueAtTime(520, audioCtx.currentTime + 0.18); g.gain.setValueAtTime(0.0001, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(1.0, audioCtx.currentTime + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.18); o.connect(g); g.connect(alarmGain); o.start(); o.stop(audioCtx.currentTime + 0.2); }
+
+/* Gradual ramp helper */
+function rampAlarmTo(targetGain, timeMs = 1000){
+  if (!alarmGain) return;
+  if (rampIntervalId) { clearInterval(rampIntervalId); rampIntervalId = null; }
+  const start = alarmGain.gain.value;
+  const duration = Math.max(200, timeMs);
+  const steps = Math.max(6, Math.round(duration / 120));
+  let step = 0;
+  rampIntervalId = setInterval(()=>{
+    step++;
+    const t = step / steps;
+    const val = start + (targetGain - start) * t;
+    alarmGain.gain.value = val;
+    if (step >= steps){ clearInterval(rampIntervalId); rampIntervalId = null; alarmGain.gain.value = targetGain; currentAlarmGainTarget = targetGain; }
+  }, Math.round(duration / steps));
+}
+
+/* When movement detected: lower to min fraction; when stationary long enough: raise to userMaxGain */
+function onMovementLowerVolume(){
+  if (!alarmGain) return;
+  const target = userMaxGain * MIN_VOLUME_FRACTION;
+  rampAlarmTo(target, 900);
+}
+function onMovementRaiseVolume(){
+  if (!alarmGain) return;
+  const target = userMaxGain;
+  rampAlarmTo(target, 900);
+}
+
+/* Helper: mark Stop Alarm (quiz) button locked/unlocked consistently */
+function markStopAlarmLocked(locked){
+  stopAlarmBtn.disabled = locked;
+  stopAlarmBtn.classList.toggle('locked', locked);
+}
+
+/* Alarm control */
+function startAlarm(){ if (!enableAlarmCheckbox.checked) return; if (alarmPlaying) return; ensureAudio(); if (!audioCtx) return; if (!isNowWithinAnyScheduleUTC()) { status.textContent = 'Alarm suppressed by schedule (outside windows)'; return; } alarmPlaying = true; alarmIntervalId = setInterval(()=>{ playBeep(); }, 420); // locked initially
+  markStopAlarmLocked(true);
+  // protect stop-program button while alarm plays
+  stopBtn.disabled = true;
+}
+function stopAlarmImmediate(){ if (alarmIntervalId){ clearInterval(alarmIntervalId); alarmIntervalId = null; } alarmPlaying = false; markStopAlarmLocked(true); quizUnlocked = false; quizStateEl.textContent = 'Quiz: Locked'; if (rampIntervalId){ clearInterval(rampIntervalId); rampIntervalId = null; } if (alarmGain) alarmGain.gain.value = userMaxGain; currentAlarmGainTarget = userMaxGain;
+  // re-enable stop-program if camera is running
+  stopBtn.disabled = !(stream && stream.getTracks && stream.getTracks().length>0);
+}
+
+/* Quiz UI */
+const quizModal = document.getElementById('quizModal');
+const choicesDiv = document.getElementById('choices');
+const quizMsg = document.getElementById('quizMsg');
+function openQuiz(){ if (!alarmPlaying || !quizUnlocked) return; quizQuestions = QUIZ_COLORS.slice(); shuffle(quizQuestions); quizIndex = 0; quizActive = true; showQuestion(); quizModal.style.visibility = 'visible'; quizModal.style.opacity = '1'; quizModal.setAttribute('aria-hidden','false'); quizMsg.textContent = ''; }
+function closeQuiz(){ quizActive = false; quizModal.style.opacity = '0'; quizModal.style.visibility = 'hidden'; quizModal.setAttribute('aria-hidden','true'); quizMsg.textContent = ''; }
+function showQuestion(){ const color = quizQuestions[quizIndex]; const colorPatch = document.getElementById('colorPatch'); colorPatch.style.background = color; document.getElementById('questionCount').textContent = `Question ${quizIndex+1} / ${quizQuestions.length}`; const choices = QUIZ_COLORS.slice(); shuffle(choices); choicesDiv.innerHTML = ''; for (const c of choices){ const btn = document.createElement('button'); btn.className='choiceBtn'; btn.textContent = c.charAt(0).toUpperCase()+c.slice(1); btn.onclick = ()=> handleAnswer(c); choicesDiv.appendChild(btn); } quizMsg.textContent=''; }
+function handleAnswer(selectedColor){ const correct = quizQuestions[quizIndex]; if (selectedColor === correct){ quizMsg.style.color='#080'; quizMsg.textContent='Correct!'; quizIndex++; if (quizIndex >= quizQuestions.length) setTimeout(()=>{ quizMsg.textContent='Finished — alarm will stop.'; closeQuiz(); stopAlarmImmediate(); }, 600); else setTimeout(()=> showQuestion(), 500); } else { quizMsg.style.color='#a00'; quizMsg.textContent='Wrong — try again'; } }
+
+/* Image processing helpers */
+function boxBlurGreys(greys,w,h){ const out=new Uint8ClampedArray(greys.length); for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ let sum=0,cnt=0; for(let oy=-1;oy<=1;oy++){ const yy=y+oy; if(yy<0||yy>=h) continue; for(let ox=-1;ox<=1;ox++){ const xx=x+ox; if(xx<0||xx>=w) continue; sum+=greys[yy*w + xx]; cnt++; } } out[y*w+x] = Math.round(sum/cnt); } } return out; }
+function contrastStretch(greys){ let min=255,max=0; for(let i=0;i<greys.length;i++){ const v=greys[i]; if(v<min) min=v; if(v>max) max=v; } const out=new Uint8ClampedArray(greys.length); if(max-min<8){ const boost=1.6; for(let i=0;i<greys.length;i++){ let v=Math.round(greys[i]*boost); out[i]=v>255?255:v; } return out; } const scale=255/(max-min); for(let i=0;i<greys.length;i++) out[i]=Math.round((greys[i]-min)*scale); return out; }
+function adaptiveMultipliers(meanBrightness){ const mediumLow=70,mediumHigh=180; let pxMult=1.0,pctMult=1.0; if(meanBrightness>=mediumLow && meanBrightness<=mediumHigh){ const mid=(mediumLow+mediumHigh)/2; const dist=Math.abs(meanBrightness-mid)/((mediumHigh-mediumLow)/2); const factor=1.3+0.3*(1-dist); pxMult=factor; pctMult=factor; } return {pxMult,pctMult}; }
+
+/* Flexible human detection (face OR upper OR lower OR mixed) */
+async function runHumanCheck(){
+  await ensureModels();
+  if (!pose || !faceDetection) return false;
+  octx.clearRect(0,0,PROC_W,PROC_H);
+
+  // 1) Face detection (video)
+  try {
+    faceDetection._lastResults = null;
+    await faceDetection.send({image: video});
+    const fres = faceDetection._lastResults;
+    if (fres && fres.detections && fres.detections.length>0){
+      const det = fres.detections[0];
+      const conf = det.score !== undefined ? (Array.isArray(det.score)?det.score[0]:det.score) : (det.score||0);
+      if (conf >= FACE_MIN_CONF){
+        const box = det.boundingBox;
+        const x = box.xCenter - box.width/2;
+        const y = box.yCenter - box.height/2;
+        octx.strokeStyle='lime'; octx.lineWidth=2;
+        octx.strokeRect(x*PROC_W, y*PROC_H, box.width*PROC_W, box.height*PROC_H);
+        octx.fillStyle='lime'; octx.font='12px sans-serif';
+        octx.fillText(`Face ${conf.toFixed(2)}`, (x+0.01)*PROC_W, (y+0.02)*PROC_W + 12);
+        return true;
+      }
+    }
+  } catch(e){ console.warn('face detect failed', e); }
+
+  // 2) Pose detection (video)
+  try {
+    pose._lastResults = null;
+    await pose.send({image: video});
+    const pres = pose._lastResults;
+    if (pres && pres.poseLandmarks){
+      const lm = pres.poseLandmarks;
+      const upperIdx = [0,1,2,11,12,13,14,15,16];
+      const lowerIdx = [23,24,25,26,27,28];
+
+      let upperFound = 0, lowerFound = 0, totalFound = 0, totalConsidered = 0;
+      for (const i of upperIdx){
+        const pt = lm[i];
+        if(!pt) continue;
+        totalConsidered++;
+        const conf = (pt.visibility !== undefined) ? pt.visibility : (pt.score || 1.0);
+        if ((conf||0) >= POSE_KEYPOINT_MIN){ upperFound++; totalFound++; octx.fillStyle='cyan'; octx.beginPath(); octx.arc(pt.x*PROC_W, pt.y*PROC_H,3,0,Math.PI*2); octx.fill(); }
+        else { octx.fillStyle='orange'; octx.beginPath(); octx.arc(pt.x*PROC_W, pt.y*PROC_H,3,0,Math.PI*2); octx.fill(); }
+      }
+      for (const i of lowerIdx){
+        const pt = lm[i];
+        if(!pt) continue;
+        totalConsidered++;
+        const conf = (pt.visibility !== undefined) ? pt.visibility : (pt.score || 1.0);
+        if ((conf||0) >= POSE_KEYPOINT_MIN){ lowerFound++; totalFound++; octx.fillStyle='cyan'; octx.beginPath(); octx.arc(pt.x*PROC_W, pt.y*PROC_H,3,0,Math.PI*2); octx.fill(); }
+        else { octx.fillStyle='orange'; octx.beginPath(); octx.arc(pt.x*PROC_W, pt.y*PROC_H,3,0,Math.PI*2); octx.fill(); }
+      }
+
+      const acceptUpper = upperFound >= 3;
+      const acceptLower = lowerFound >= 3;
+      const acceptMixed = totalFound >= 4;
+
+      if (acceptUpper || acceptLower || acceptMixed){
+        octx.fillStyle='lime'; octx.font='12px sans-serif';
+        octx.fillText(`Human detected (U:${upperFound} L:${lowerFound} T:${totalFound})`, 8, 12);
+        return true;
+      } else {
+        octx.fillStyle='#ffa500'; octx.font='12px sans-serif';
+        octx.fillText(`Pose weak (U:${upperFound} L:${lowerFound} T:${totalFound})`, 8, 12);
+        return false;
+      }
+    }
+  } catch(e){ console.warn('pose detect failed', e); }
+
+  return false;
+}
+
+/* Pose-motion detection helper */
+function poseMotionDetected(landmarks){
+  try{
+    if (!landmarks || !Array.isArray(landmarks)) return false;
+    if (!prevPoseLandmarks){
+      prevPoseLandmarks = landmarks.map(l => ({x:l.x, y:l.y}));
+      return false;
+    }
+    let countAbove = 0;
+    let maxDisp = 0;
+    for (const idx of POSE_MOTION_INDICES){
+      const cur = landmarks[idx];
+      const prev = prevPoseLandmarks[idx];
+      if (!cur || !prev) continue;
+      const dx = cur.x - prev.x;
+      const dy = cur.y - prev.y;
+      const disp = Math.sqrt(dx*dx + dy*dy);
+      if (disp > POSE_MOTION_THRESH) countAbove++;
+      if (disp > maxDisp) maxDisp = disp;
+    }
+    prevPoseLandmarks = landmarks.map(l => ({x:l.x, y:l.y}));
+    return (countAbove >= POSE_MOTION_MIN_POINTS) || (maxDisp > POSE_MOTION_THRESH);
+  }catch(e){
+    console.warn('poseMotionDetected error', e);
+    return false;
+  }
+}
+
+/* smoothing helper used for display/logging */
+function pushConfirm(val){ humanConfirmBuffer.push(val?1:0); if (humanConfirmBuffer.length>CONFIRM_WINDOW) humanConfirmBuffer.shift(); const s = humanConfirmBuffer.reduce((a,b)=>a+b,0); return s >= CONFIRM_REQUIRED; }
+
+/* Movement unlock timers & state */
+let movementAccum = 0; // ms
+let stationaryAccum = 0;
+let movementCounting = false;
+let stationaryCounting = false;
+
+/* Main loop */
+let lastTimeLocal = 0;
+async function processFrame(){
+  if(!video.srcObject || video.readyState < 2) return;
+  const now = performance.now();
+  if (now - lastTimeLocal < (1000 / TARGET_FPS)) return;
+  const dt = now - lastTimeLocal;
+  lastTimeLocal = now;
+
+  pctx.drawImage(video, 0, 0, PROC_W, PROC_H);
+  const img = pctx.getImageData(0,0,PROC_W,PROC_H);
+  const data = img.data;
+  const num = PROC_W * PROC_H;
+  const greys = new Uint8ClampedArray(num);
+  let sumBrightness = 0;
+  for (let i=0,j=0;i<data.length;i+=4,j++){
+    const r=data[i], g=data[i+1], b=data[i+2];
+    const grey = Math.round(0.299*r + 0.587*g + 0.114*b);
+    greys[j] = grey; sumBrightness += grey;
+  }
+  const meanBrightness = sumBrightness / num;
+  const blurred = boxBlurGreys(greys, PROC_W, PROC_H);
+  const stretched = contrastStretch(blurred);
+  const gamma = 0.8;
+  const gammaLUT = new Uint8ClampedArray(256);
+  for (let v=0; v<256; v++) gammaLUT[v] = Math.min(255, Math.round(255 * Math.pow(v/255, gamma)));
+  const processed = new Uint8ClampedArray(num);
+  for (let i=0;i<num;i++) processed[i] = gammaLUT[stretched[i]];
+
+  if (!prevAvg){
+    prevAvg = new Float32Array(num);
+    for (let i=0;i<num;i++) prevAvg[i] = processed[i];
+    dctx.clearRect(0,0,PROC_W,PROC_H);
+    octx.clearRect(0,0,PROC_W,PROC_H);
+    status.textContent = 'Warming background...';
+    lastHumanSeen = performance.now();
+    lastHumanMotion = performance.now();
+    humanConfirmBuffer = [];
+    prevPoseLandmarks = null;
+    presenceScore = 0;
+    movingScore = 0;
+    movementAccum = 0;
+    stationaryAccum = 0;
+    return;
+  }
+
+  const alpha = 0.03;
+  for (let i=0;i<num;i++) prevAvg[i] = prevAvg[i] * (1 - alpha) + processed[i] * alpha;
+
+  const {pxMult,pctMult} = adaptiveMultipliers(meanBrightness);
+  const basePxThresh = 6;
+  const pxThresh = Math.max(1, Math.round(basePxThresh * pxMult));
+  // use user-configured detect percent for pixelMotion (sensitive)
+  const detectPercent = Math.max(0.01, Number(motionDetectPercentInput.value || 3.0));
+
+  let changed = 0;
+  const diffImg = dctx.createImageData(PROC_W, PROC_H);
+  for (let i=0;i<num;i++){
+    const d = Math.abs(processed[i] - prevAvg[i]);
+    if (d > pxThresh) changed++;
+    const v = Math.min(255, Math.round(d));
+    const di = i*4;
+    diffImg.data[di] = v; diffImg.data[di+1] = v; diffImg.data[di+2] = v; diffImg.data[di+3] = 255;
+  }
+  dctx.putImageData(diffImg,0,0);
+
+  const percentChanged = (changed / num) * 100;
+  lastMotionPercent = percentChanged;
+  // pixel sensitivity uses detectPercent
+  const pixelMotion = percentChanged >= detectPercent;
+
+  // pose-based motion
+  let poseMotion = false;
+  try {
+    const pres = pose && pose._lastResults;
+    if (pres && pres.poseLandmarks){
+      poseMotion = poseMotionDetected(pres.poseLandmarks);
+    }
+  } catch(e){ console.warn('pose motion check failed', e); }
+
+  const motion = pixelMotion || poseMotion;
+
+  // Motion percent threshold to count as movement for unlocking uses unlockPercent
+  const unlockPercent = Math.max(0.1, Number(motionUnlockPercentInput.value || 25.0));
+  const isMovingForUnlock = percentChanged >= unlockPercent;
+
+  // Update movement/stationary accumulators when alarm is playing
+  if (alarmPlaying){
+    if (isMovingForUnlock){
+      movementAccum += dt;
+      stationaryAccum = 0;
+    } else {
+      stationaryAccum += dt;
+      movementAccum = 0;
+    }
+    // unlock/resume timings
+    const unlockMs = Math.max(100, Number(unlockSecondsInput.value || 7) * 1000);
+    const resumeMs = RESUME_DURATION_MS; // fixed 10s
+
+    if (!quizUnlocked && movementAccum >= unlockMs){
+      quizUnlocked = true;
+      quizStateEl.textContent = 'Quiz: Unlocked';
+      markStopAlarmLocked(false);
+      onMovementLowerVolume();
+    }
+
+    if (quizUnlocked && stationaryAccum >= resumeMs && quizActive === false){
+      onMovementRaiseVolume();
+    }
+
+    // while moving above unlockPercent, lower volume
+    if (isMovingForUnlock){
+      onMovementLowerVolume();
+    } else {
+      // if stationary for resumeMs, raise
+      if (!isMovingForUnlock && (stationaryAccum >= resumeMs || !quizUnlocked)){
+        onMovementRaiseVolume();
+      }
+    }
+
+    // ensure stop button remains disabled while alarm is active
+    stopBtn.disabled = true;
+  } else {
+    movementAccum = 0;
+    stationaryAccum = 0;
+    // when not playing, stop button should reflect whether camera is running
+    stopBtn.disabled = !(stream && stream.getTracks && stream.getTracks().length>0);
+  }
+
+  // run human presence check whenever motion or at presence-interval
+  const runPresenceNow = motion || (performance.now() - lastPresenceCheck >= PRESENCE_CHECK_INTERVAL_MS);
+  if (runPresenceNow){
+    lastPresenceCheck = performance.now();
+    runHumanCheck().then((detected) => {
+      if (detected) presenceScore = Math.min(PRESENCE_SCORE_MAX, presenceScore + PRESENCE_INC);
+      else presenceScore = Math.max(0, presenceScore - PRESENCE_DEC);
+      const stableHumanPresent = presenceScore >= PRESENCE_ON_THRESH;
+
+      if (motion) movingScore = Math.min(MOVING_SCORE_MAX, movingScore + MOVING_INC);
+      else movingScore = Math.max(0, movingScore - MOVING_DEC);
+      const stableHumanMoving = movingScore >= MOVING_ON_THRESH;
+
+      if (stableHumanPresent) lastHumanSeen = performance.now();
+      if (stableHumanMoving) lastHumanMotion = performance.now();
+
+      humanLabel.textContent = stableHumanPresent ? (stableHumanMoving ? 'Human moving ✅' : 'Human present (still)') : 'No human detected';
+      debugEl.textContent = `motion%:${lastMotionPercent.toFixed(2)} detect%:${detectPercent} unlock%:${unlockPercent} ps:${presenceScore} ms:${movingScore} unlocked:${quizUnlocked}`;
+    }).catch((e)=>{ console.error('presence check error', e); });
+  } else {
+    if (motion) movingScore = Math.min(MOVING_SCORE_MAX, movingScore + MOVING_INC);
+    else movingScore = Math.max(0, movingScore - MOVING_DEC);
+    debugEl.textContent = `motion%:${lastMotionPercent.toFixed(2)} ps:${presenceScore} ms:${movingScore} unlocked:${quizUnlocked}`;
+  }
+
+  status.textContent = motion ? `Motion — ${percentChanged.toFixed(2)}% changed. Mean brightness: ${Math.round(meanBrightness)}` : `No motion — ${percentChanged.toFixed(2)}% changed. Mean brightness: ${Math.round(meanBrightness)}`;
+
+  checkInactivity();
+}
+
+/* ===== Alarm logic + schedule gating ===== */
+function isNowWithinAnyScheduleUTC(){
+  if (schedules.length === 0) return true;
+  const now = Date.now();
+  return schedules.some(s => now >= s.startUTC && now <= s.endUTC);
+}
+
+function checkInactivity(){
+  const idleSec = Math.max(1, Number(idleTimeoutInput.value || 20));
+  const idleMs = idleSec * 1000;
+  const now = performance.now();
+  const humanPresent = (now - lastHumanSeen) < PRESENCE_TIMEOUT_MS;
+  const humanIdle = (now - lastHumanMotion) >= idleMs;
+
+  if (!isNowWithinAnyScheduleUTC()){
+    if (alarmPlaying) stopAlarmImmediate();
+    status.textContent = 'Outside active schedules — alarm suppressed';
+    return;
+  }
+  if (!humanPresent){
+    if (alarmPlaying) stopAlarmImmediate();
+    status.textContent = 'No human present — alarm disabled';
+    return;
+  }
+  if (!humanIdle){
+    if (alarmPlaying && !persistentAlarmCheckbox.checked) stopAlarmImmediate();
+    status.textContent = 'Human present and moving — alarm suppressed';
+    return;
+  }
+  if (enableAlarmCheckbox.checked && !alarmPlaying){
+    startAlarm();
+    status.textContent = 'Human present but idle — alarm triggered! ⏰';
+    // reset unlock state when alarm starts
+    quizUnlocked = false;
+    quizStateEl.textContent = 'Quiz: Locked';
+    markStopAlarmLocked(true);
+    movementAccum = 0;
+    stationaryAccum = 0;
+    // protect stop button
+    stopBtn.disabled = true;
+  } else if (!enableAlarmCheckbox.checked){
+    status.textContent = 'Human present but idle — alarm disabled';
+  }
+}
+
+/* ===== Schedules add/remove/persist ===== */
+function addScheduleFromInputs(){
+  const ds = schedStartDate.value, ts = schedStartTime.value, de = schedEndDate.value, te = schedEndTime.value;
+  if (!ds || !ts || !de || !te) { alert('Please set both start and end date/time (WIB).'); return; }
+  const sUtc = parseWibToUtcMillis(ds, ts);
+  const eUtc = parseWibToUtcMillis(de, te);
+  if (!sUtc || !eUtc || isNaN(sUtc) || isNaN(eUtc)) { alert('Invalid schedule values.'); return; }
+  if (eUtc <= sUtc) { alert('End must be after start.'); return; }
+  schedules.push({ startUTC: sUtc, endUTC: eUtc });
+  schedules.sort((a,b) => a.startUTC - b.startUTC);
+  try { localStorage.setItem('motion_alarm_schedules_v1', JSON.stringify(schedules)); } catch(e){}
+  updateNowAndSchedUI();
+  status.textContent = 'Schedule added';
+}
+schedAdd.addEventListener('click', addScheduleFromInputs);
+
+schedClearAll.addEventListener('click', ()=> {
+  if (!confirm('Clear all schedules?')) return;
+  schedules = [];
+  try { localStorage.setItem('motion_alarm_schedules_v1', JSON.stringify(schedules)); } catch(e){}
+  updateNowAndSchedUI();
+  status.textContent = 'All schedules cleared';
+});
+
+/* ===== START / STOP handlers ===== */
+async function start(){
+  try {
+    ensureAudio();
+    ensureModels();
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      audio: false
+    });
+    video.srcObject = stream;
+
+    startBtn.disabled = true; stopBtn.disabled = false; markStopAlarmLocked(true);
+    // ensure stop disabled if alarm already playing (most likely not)
+    stopBtn.disabled = alarmPlaying ? true : false;
+
+    status.textContent = 'Camera active — loading models and processing...';
+
+    prevAvg = null; lastTime = performance.now();
+    lastHumanSeen = performance.now(); lastHumanMotion = performance.now();
+    lastPresenceCheck = 0; humanConfirmBuffer = [];
+    prevPoseLandmarks = null; presenceScore = 0; movingScore = 0;
+    movementAccum = 0; stationaryAccum = 0; quizUnlocked = false; quizStateEl.textContent = 'Quiz: Locked';
+
+    await new Promise(resolve => {
+      if (video.readyState >= 2) return resolve();
+      const onCan = () => { video.removeEventListener('canplay', onCan); resolve(); };
+      video.addEventListener('canplay', onCan);
+      setTimeout(resolve, 800);
+    });
+
+    try {
+      const detected = await runHumanCheck();
+      if (detected){ lastHumanSeen = performance.now(); humanLabel.textContent = 'Human present (initial check)'; }
+      else { humanLabel.textContent = 'No human detected (initial check)'; }
+    } catch(e) { console.warn('Initial presence check failed or still loading:', e); }
+
+    if (raf) cancelAnimationFrame(raf);
+    (function loop(){ processFrame(); raf = requestAnimationFrame(loop); })();
+  } catch(e){
+    console.error(e);
+    status.textContent = 'Camera access denied or not available';
+  }
+}
+function stop(){
+  // prevent stopping the program while alarm is playing
+  if (alarmPlaying){
+    status.textContent = 'Cannot stop program while alarm is active — finish or stop the alarm first';
+    return;
+  }
+
+  if (raf) cancelAnimationFrame(raf);
+  if (stream) stream.getTracks().forEach(t=>t.stop());
+  stream = null; video.srcObject = null; prevAvg = null; prevPoseLandmarks = null;
+  startBtn.disabled = false; stopBtn.disabled = true; markStopAlarmLocked(true);
+  status.textContent = 'Camera stopped';
+  dctx.clearRect(0,0,diff.width,diff.height);
+  octx.clearRect(0,0,overlay.width,overlay.height);
+  stopAlarmImmediate();
+}
+
+/* ===== Events & UI glue ===== */
+startBtn.addEventListener('click', start);
+stopBtn.addEventListener('click', stop);
+stopAlarmBtn.addEventListener('click', ()=>{ if (alarmPlaying && quizUnlocked) openQuiz(); else if (!alarmPlaying) stopAlarmImmediate(); });
+enableAlarmCheckbox.addEventListener('change', ()=>{ if (!enableAlarmCheckbox.checked) stopAlarmImmediate(); });
+
+alarmVolInput.addEventListener('input', ()=> {
+  av.textContent = alarmVolInput.value;
+  userMaxGain = mapSliderToGain(alarmVolInput.value);
+  if (alarmGain && !alarmPlaying) alarmGain.gain.value = userMaxGain;
+});
+
+window.addEventListener('beforeunload', ()=>{ stop(); if (audioCtx && audioCtx.state !== 'closed') try{ audioCtx.close(); }catch(e){} });
+
+setInterval(()=> {
+  updateNowAndSchedUI();
+  if (!isNowWithinAnyScheduleUTC() && alarmPlaying) {
+    stopAlarmImmediate();
+    status.textContent = 'Schedule ended — alarm stopped (camera still running)';
+  }
+  // keep lock state & stop button in sync
+  markStopAlarmLocked(!alarmPlaying || !quizUnlocked);
+  stopBtn.disabled = alarmPlaying ? true : !(stream && stream.getTracks && stream.getTracks().length>0);
+}, 1000);
+
+/* small helpers */
+window.addEventListener('keydown', (e)=>{ if (quizActive && e.key==='Escape'){ if (quizMsg){ quizMsg.style.color='#a00'; quizMsg.textContent='You must finish the quiz to stop the alarm.'; } } });
+setInterval(()=>{ markStopAlarmLocked(!alarmPlaying || !quizUnlocked); stopBtn.disabled = alarmPlaying ? true : !(stream && stream.getTracks && stream.getTracks().length>0); }, 300);
+
+/* init */
+updateNowAndSchedUI();
+
+</script>
+</body>
+</html>
